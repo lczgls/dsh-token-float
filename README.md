@@ -8,6 +8,10 @@
 
 一个纯本地 DSH 客户端插件：在**侧边栏底部、头像和名字上方**固定显示当前会话的 token 累计与估算金额，点一下展开明细。
 
+![侧边栏读数：折叠行与展开明细](assets/sidebar.png)
+
+<sub>新会话的初始状态（还没用量所以是 0）；余额和账号昵称已打码。</sub>
+
 ```
 ● 消耗中                    10.70M ¥3.00      ← 正在调模型，在烧 token
 ● 本机执行                  10.70M ¥3.00      ← 本轮在跑，但只在跑本地工具/命令
@@ -103,9 +107,69 @@ POST /dsh-token-float-api/ledger { day, cost }   → { ok, days }
 - 路由不存在（Host 没重启、或旧版本）→ 探测到 404 就退回纯 `localStorage`，功能照常，不会报错。
 - 这是**「按本机观测」的账**：只统计这台机器、这次安装看到的量，不是 DeepSeek 账单；和真余额对得上是因为价目表同样按官方峰谷价。
 
-## 安装位置
+## 安装
 
-插件本体在 profile 里（工作区的 `token-float/` 是指向它的目录联接，两边改的是同一份文件）。Linux 上是：
+前提：已经装好 DeepSeek Harness，并且知道自己的 **profile 目录**在哪（插件都装在这里）：
+
+- Linux / macOS：`~/.dsh/profiles/<profile>/`，Web 服务一般是 `web`
+- Windows：`%USERPROFILE%\.dsh\profiles\<profile>\`，桌面版一般是 `desktop`
+
+不知道是哪个，就看 `~/.dsh/profiles/` 下哪个目录里有 `package.json` 和 `cordis.patch.yml`，或者看正在用的那个有没有 `node_modules`。
+
+### 1. 放进 profile（不用 pnpm，手搓链接最省事）
+
+```bash
+PROFILE=~/.dsh/profiles/web          # ← 换成你自己的 profile 目录
+
+git clone https://github.com/imlk/dsh-token-float.git "$PROFILE/plugins/dsh-token-float"
+mkdir -p "$PROFILE/node_modules"
+ln -sfn ../plugins/dsh-token-float "$PROFILE/node_modules/dsh-token-float"
+```
+
+Windows（PowerShell，管理员或开发者模式）：
+
+```powershell
+$profile_dir = "$env:USERPROFILE\.dsh\profiles\desktop"   # ← 换成你自己的
+git clone https://github.com/imlk/dsh-token-float.git "$profile_dir\plugins\dsh-token-float"
+New-Item -ItemType Directory -Force "$profile_dir\node_modules" | Out-Null
+New-Item -ItemType Junction -Path "$profile_dir\node_modules\dsh-token-float" -Target "$profile_dir\plugins\dsh-token-float"
+```
+
+### 2. 登记到 profile 的 `package.json`
+
+两处都要加（`bundles` 里的名字必须和目录名一致）：
+
+```jsonc
+{
+  "dependencies": {
+    "dsh-token-float": "link:./plugins/dsh-token-float"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [ "…原有的…", "dsh-token-float" ]
+    }
+  }
+}
+```
+
+### 3. 重启 DSH
+
+`index.js` 里的账本路由要宿主启动时才注册，所以**第一次装完必须重启一次**。
+
+### 4. 确认装上了
+
+「设置 → 插件」里应该出现 **dsh-token-float**，状态 **Running**、`1 total · 1 running`，点进去有自己的设置页；侧边栏底部头像上方多出一行读数。
+
+### 装不上时先看这几条
+
+- **插件页标 Problem / "declares no bundle"**：说明 profile 的 `dsh.profile.bundles` 里没写 `dsh-token-float`。
+- **页面上什么都没有**：`node_modules/dsh-token-float` 的符号链接没建对（`ls -l` 看它是不是指向 `plugins/dsh-token-float`），或者 profile 选错了。
+- **读数出现但一直是 0**：正常，新会话还没有用量；发一句话就会动。
+- **别在 profile 的 `cordis.patch.yml` 里再写 `insert`**：插件包自带 `cordis.patch.yml`，两处都写会插进两行。
+
+## 装好之后它在哪
+
+插件本体在 profile 里（本仓库就是这份代码的副本）：
 
 ```
 ~/.dsh/profiles/web/plugins/dsh-token-float/
@@ -115,10 +179,6 @@ POST /dsh-token-float-api/ledger { day, cost }   → { ok, days }
 ├── client.js        # 浏览器半侧：读数 + 明细面板 + 余额 + 账本同步 + 设置页
 └── README.md
 ```
-
-Windows 上对应 `%USERPROFILE%\.dsh\profiles\desktop\plugins\dsh-token-float\`。
-
-`node_modules/dsh-token-float` 是指向它的目录联接，profile 的 `package.json` 里登记为 `"dsh-token-float": "link:./plugins/dsh-token-float"`，这样装别的插件时 `pnpm install` 不会把它当多余目录清掉。
 
 **它是一个「组合包」（bundle），所以出现在「设置 → 插件」列表里、能被开关和卸载**：
 
