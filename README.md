@@ -121,7 +121,7 @@ POST /dsh-token-float-api/ledger { day, cost }   → { ok, days }
 ```bash
 PROFILE=~/.dsh/profiles/web          # ← 换成你自己的 profile 目录
 
-git clone https://github.com/imlk/dsh-token-float.git "$PROFILE/plugins/dsh-token-float"
+git clone https://github.com/lczgls/dsh-token-float.git "$PROFILE/plugins/dsh-token-float"
 mkdir -p "$PROFILE/node_modules"
 ln -sfn ../plugins/dsh-token-float "$PROFILE/node_modules/dsh-token-float"
 ```
@@ -130,7 +130,7 @@ Windows（PowerShell，管理员或开发者模式）：
 
 ```powershell
 $profile_dir = "$env:USERPROFILE\.dsh\profiles\desktop"   # ← 换成你自己的
-git clone https://github.com/imlk/dsh-token-float.git "$profile_dir\plugins\dsh-token-float"
+git clone https://github.com/lczgls/dsh-token-float.git "$profile_dir\plugins\dsh-token-float"
 New-Item -ItemType Directory -Force "$profile_dir\node_modules" | Out-Null
 New-Item -ItemType Junction -Path "$profile_dir\node_modules\dsh-token-float" -Target "$profile_dir\plugins\dsh-token-float"
 ```
