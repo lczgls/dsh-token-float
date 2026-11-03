@@ -1,12 +1,8 @@
 # dsh-token-float · 侧边栏实时 token / 金额读数
 
-> **English** — a local-only DeepSeek Harness client plugin that pins a live
-> token / cost readout above the account row in the sidebar. It prices usage with DeepSeek's official
-> peak / off-peak table (per model), shows the **real account balance** through the host account service
-> (no API key in the browser), keeps a durable daily ledger on disk, marks each turn as burning / local-only /
-> idle, and ships its own settings page. No telemetry; the only HTTP it adds is one authenticated host route.
+一个纯本地的 DeepSeek Harness 客户端插件：在**侧边栏底部、头像和名字上方**固定显示当前会话的 token 累计与估算金额，点一下展开明细。
 
-一个纯本地 DSH 客户端插件：在**侧边栏底部、头像和名字上方**固定显示当前会话的 token 累计与估算金额，点一下展开明细。
+它按 DeepSeek 官方峰谷价、分模型计价；通过宿主账号服务读**真实余额**（浏览器里不放任何 key）；按日把花费落到磁盘；把每一轮标成「消耗中 / 本机执行 / 不消耗」；并且自带一页设置。没有任何遥测，它新增的 HTTP 只有一条需要宿主鉴权的本地路由。
 
 ![侧边栏读数：折叠行与展开明细](assets/sidebar.png)
 
