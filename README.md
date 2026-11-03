@@ -1,5 +1,11 @@
 # dsh-token-float · 侧边栏实时 token / 金额读数
 
+> **English** — a local-only [DeepSeek Harness](https://github.com/deepseek-ai) client plugin that pins a live
+> token / cost readout above the account row in the sidebar. It prices usage with DeepSeek's official
+> peak / off-peak table (per model), shows the **real account balance** through the host account service
+> (no API key in the browser), keeps a durable daily ledger on disk, marks each turn as burning / local-only /
+> idle, and ships its own settings page. No telemetry; the only HTTP it adds is one authenticated host route.
+
 一个纯本地 DSH 客户端插件：在**侧边栏底部、头像和名字上方**固定显示当前会话的 token 累计与估算金额，点一下展开明细。
 
 ```
