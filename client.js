@@ -33,6 +33,7 @@ window.__ModuleLoader__.load({
 			total: "合计",
 			today: "今日已用",
 			balance: "余额",
+			lowBalance: "余额不足",
 			bonus: "含赠金",
 			lastTurn: "上一轮",
 			peak: "峰谷",
@@ -76,6 +77,7 @@ window.__ModuleLoader__.load({
 			total: "Total",
 			today: "Today",
 			balance: "Balance",
+			lowBalance: "Low balance",
 			bonus: "incl. bonus",
 			lastTurn: "Last turn",
 			peak: "Pricing",
@@ -749,8 +751,12 @@ window.__ModuleLoader__.load({
 		const strong = "var(--dsw-alias-label-primary, inherit)";
 		const accent = "var(--dsw-alias-state-business-primary, #2563eb)";
 		const hairline = "var(--dsw-alias-border-l3, rgba(0,0,0,0.08))";
+		/** Shown in place of the usual accent when the account is nearly out of money. */
+		const danger = "var(--dsw-alias-state-danger-primary, #e5484d)";
+		/** Balance (in the wallet's own currency) at or below which the row warns. */
+		const LOW_BALANCE = 1;
 
-		function meterRow(label, value, money, bold) {
+		function meterRow(label, value, money, bold, alert) {
 			return h(
 				"div",
 				{
@@ -766,16 +772,20 @@ window.__ModuleLoader__.load({
 						fontWeight: bold ? 600 : 400
 					}
 				},
-				h("span", { style: { whiteSpace: "nowrap" } }, label),
+				h("span", { style: { whiteSpace: "nowrap", flex: "0 0 auto", opacity: bold ? 1 : 0.86 } }, label),
 				h(
 					"span",
 					{
 						style: {
-							color: strong,
+							color: alert ? danger : strong,
+							fontWeight: alert ? 600 : undefined,
 							fontVariantNumeric: "tabular-nums",
 							whiteSpace: "nowrap",
 							overflow: "hidden",
-							textOverflow: "ellipsis"
+							textOverflow: "ellipsis",
+							textAlign: "right",
+							flex: "1 1 auto",
+							minWidth: 0
 						}
 					},
 					[value, money]
@@ -974,6 +984,11 @@ window.__ModuleLoader__.load({
 			const currency = settings.pricingMode === "manual" ? settings.currency : "\u00a5";
 			const wallet = snapshot.balance && snapshot.balance.currency === "USD" ? "$" : "\u00a5";
 			const money = formatMoney(snapshot.cost, currency);
+			// Wallet balance is the one number the user cannot fix from inside the app,
+			// so it gets a warning badge on the collapsed row instead of hiding in the detail.
+			const balanceValue = snapshot.balance ? Number(snapshot.balance.total) : NaN;
+			const lowBalance = Number.isFinite(balanceValue) && balanceValue < LOW_BALANCE;
+			const balanceText = snapshot.balance ? formatMoney(balanceValue, wallet) : "";
 			const expanded = settings.expanded;
 			const showDetail = expanded && wide !== false;
 			const price = snapshot.tier.peak ? t_row("peakLabel") : t_row("offLabel");
@@ -986,7 +1001,7 @@ window.__ModuleLoader__.load({
 					role: "button",
 					tabIndex: 0,
 					title: snapshot.balance
-						? t_row("balance") + " " + formatMoney(snapshot.balance.total, wallet)
+						? t_row("balance") + " " + balanceText + (lowBalance ? " · " + t_row("lowBalance") : "")
 						: t_row("title"),
 					onClick: toggle,
 					onKeyDown: (event) => {
@@ -1055,14 +1070,35 @@ window.__ModuleLoader__.load({
 					wide === false
 						? null
 						: h("span", { style: { fontSize: 10, color: dim } }, formatTokens(snapshot.total)),
-					h("span", { style: { fontSize: 11, fontWeight: 600, color: accent } }, money)
+					h("span", { style: { fontSize: 11, fontWeight: 600, color: accent } }, money),
+					lowBalance
+						? h(
+								"span",
+								{
+									style: {
+										fontSize: 9,
+										fontWeight: 700,
+										lineHeight: "13px",
+										color: "#fff",
+										background: danger,
+										borderRadius: 3,
+										padding: "0 3px",
+										flex: "0 0 auto"
+									}
+								},
+								"!"
+							)
+						: null
 				)
 			);
 
 			const detail = showDetail
 				? h(
 						"div",
-						{ style: { marginTop: 4, borderTop: "1px solid " + hairline, paddingTop: 4 } },
+						{
+							"data-dsh-token-float": "detail",
+							style: { marginTop: 4, borderTop: "1px solid " + hairline, paddingTop: 4 }
+						},
 						h(
 							"div",
 							{
@@ -1071,6 +1107,7 @@ window.__ModuleLoader__.load({
 									justifyContent: "space-between",
 									alignItems: "center",
 									fontSize: 10,
+									lineHeight: "15px",
 									color: dim,
 									marginBottom: 2
 								}
@@ -1107,7 +1144,8 @@ window.__ModuleLoader__.load({
 										? t_row("bonus") + " " + formatMoney(snapshot.balance.granted, wallet)
 										: "",
 									formatMoney(snapshot.balance.total, wallet),
-									true
+									true,
+									lowBalance
 								)
 							: null,
 						snapshot.lastTurn === null
@@ -1120,15 +1158,27 @@ window.__ModuleLoader__.load({
 								style: {
 									display: "flex",
 									justifyContent: "space-between",
+									alignItems: "baseline",
+									gap: 10,
 									fontSize: 10,
 									lineHeight: "15px",
 									color: dim
 								}
 							},
-							h("span", null, t_row("peak")),
+							h("span", { style: { whiteSpace: "nowrap", flex: "0 0 auto", opacity: 0.86 } }, t_row("peak")),
 							h(
 								"span",
-								{ style: { fontVariantNumeric: "tabular-nums" } },
+								{
+									style: {
+										fontVariantNumeric: "tabular-nums",
+										whiteSpace: "normal",
+										wordBreak: "break-word",
+										textAlign: "right",
+										flex: "1 1 auto",
+										minWidth: 0,
+										lineHeight: "16px"
+									}
+								},
 								(countdown ? price + " · " + switchLabel + " " + countdown : price) +
 									" · " +
 									snapshot.model.name
@@ -1157,14 +1207,14 @@ window.__ModuleLoader__.load({
 										border: "none",
 										background: "transparent",
 										color: accent,
-										fontSize: 10,
+										fontSize: 11,
 										cursor: "pointer",
 										padding: 0
 									}
 								},
 								t_row("pricing")
 							),
-							h("span", { style: { fontSize: 9, color: dim } }, t_row("note"))
+							h("span", { style: { fontSize: 10, color: dim, opacity: 0.8 } }, t_row("note"))
 						)
 					)
 				: null;
@@ -1329,15 +1379,26 @@ window.__ModuleLoader__.load({
 					style: {
 						display: "flex",
 						justifyContent: "space-between",
-						fontSize: 10,
-						lineHeight: "15px",
+						alignItems: "baseline",
+						gap: 10,
+						fontSize: 11,
+						lineHeight: "18px",
 						color: dim
 					}
 				},
-				h("span", null, t_row("context")),
+				h("span", { style: { whiteSpace: "nowrap", flex: "0 0 auto", opacity: 0.86 } }, t_row("context")),
 				h(
 					"span",
-					{ style: { color: strong, fontVariantNumeric: "tabular-nums" } },
+					{
+						style: {
+							color: strong,
+							fontVariantNumeric: "tabular-nums",
+							whiteSpace: "nowrap",
+							textAlign: "right",
+							flex: "1 1 auto",
+							minWidth: 0
+						}
+					},
 					(percent ? percent + " · " : "") +
 						formatTokens(snapshot.context.used) +
 						"/" +
