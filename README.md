@@ -1,0 +1,183 @@
+# dsh-token-float · 侧边栏实时 token / 金额读数
+
+一个纯本地 DSH 客户端插件：在**侧边栏底部、头像和名字上方**固定显示当前会话的 token 累计与估算金额，点一下展开明细。
+
+```
+● 消耗中                    10.70M ¥3.00      ← 正在调模型，在烧 token
+● 本机执行                  10.70M ¥3.00      ← 本轮在跑，但只在跑本地工具/命令
+○ 不消耗                    10.70M ¥3.00      ← 空闲
+```
+
+左边是**消耗状态标记**，三态：
+
+| 标记 | 含义 | 判定 |
+|---|---|---|
+| `● 消耗中`（蓝、呼吸） | 正在跟模型对话，token 在涨 | 本轮在跑，且最近 2 分钟内 token 用量或上下文压力有更新 |
+| `● 本机执行`（灰） | 本轮在跑，但没在调模型 | 本轮在跑，但 2 分钟内没有任何用量/上下文变化（工具、命令、读写文件） |
+| `○ 不消耗`（空心圈） | 空闲 | 本轮已结束 |
+
+> 为什么是「2 分钟内没有变化」而不是更精确的「正在流式输出」：浏览器侧能拿到的信号只有 `tokenUsage` / `contextPressure` 投影和会话的 running 状态，**没有「模型请求正在飞」的标志**。一次模型请求开始时上下文压力会变一次、回答落地时用量会变一次，中间长时间思考/流式输出可能没有新帧。所以规则是「最近有模型活动就算消耗中」，静默超过 2 分钟才判为本机执行——这样跑本地长任务（比如十几分钟的翻译脚本）会正确落到「本机执行」，而普通问答全程保持「消耗中」。两个常量在 `client.js` 顶部：`BURN_WINDOW_MS`（阈值）和 tick 间隔（15s 重算一次）。
+
+展开后（数据实时，随对话增长）：
+
+```
+本会话                                消耗中
+    输入·未命中         0.50M · ¥1.00
+    输入·缓存命中     10.00M · ¥0.40
+    缓存写入               0 · ¥0.00
+    输出               0.20M · ¥1.60
+    合计              10.70M · ¥3.00
+    今日已用                 ¥12.50
+    余额                     ¥20.00
+    上一轮                    ¥0.25
+    上下文      12% · 125.0k/1.05M
+    峰谷   高峰价 · 距谷价 48m · V4.1 Flash
+    价目表              估算，非账单
+```
+
+## 计价：按 DeepSeek 官方峰谷价，而不是一套拍脑袋的固定价
+
+参考 [`MeteorNOX/DeepSeek-Balance-Whale-Widget`](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget) 的价目表重做：**DeepSeek 是峰谷价，而且按模型分档**。之前用一套固定单价（¥2 / ¥0.2 / ¥8）把所有 token 都按同一个价算，谷价时段会贵好几倍。
+
+| 模型 | 时段 | 缓存命中 | 缓存未命中 | 输出 |
+|---|---|---|---|---|
+| `deepseek-flash`（V4.1 Flash） | 谷价 | 0.02 | 1 | 4 |
+| | 高峰 | 0.04 | 2 | 8 |
+| `deepseek-v4-pro`（V4 Pro） | 谷价 | 0.15 | 4.5 | 13.5 |
+| | 高峰 | 0.30 | 9.0 | 27.0 |
+
+单位：元 / 百万 token。**高峰 = 工作日 09:00–12:00、14:00–18:00（北京时间），其余时间与整个周末都是谷价（半价）。** 表在 `client.js` 顶部的 `PRICING`，官方调价改这里即可。
+
+几处实现上的取舍：
+
+- **按增量计价，而不是按当前时刻重算历史。** 每次投影推来新用量，就把这一段增量按「此刻所处时段」的价格记进去；页面打开前已有的历史按打开时的时段一次性定价。所以一个跨越 18:00 的长会话，18:00 之前的部分仍按高峰价、之后按谷价。
+- **模型档位**取自会话的 `modelSelection` 投影（`deepseek-flash` / `deepseek-v4-pro`），面板右下角会显示识别到的模型名。
+- **「今日已用」是本机观测值**：按本页看到的增量累计，另外每个会话首次出现时会一次性并入它已有的金额（同一天同一会话只补一次，刷新页面不会重复记）。换机器、换浏览器、或页面没打开时的消耗都不在内——它跟账单口径不一样。
+- **「上一轮」**：会话从「生成中」转为空闲时，结算这一轮新增的金额。
+- 需要别的价（第三方中转、自定义模型）可在「价目表 → 改手动」里填单价并选 CNY/USD；默认「跟随内置」。
+
+## 数据来源
+
+| 显示项 | 来源 | 说明 |
+|---|---|---|
+| token 明细 | `tokenUsage` 会话投影 | Host 侧 `@deepseek-ai/dsh-token-meter` 折叠整份会话日志得到的 `uncachedInputTokens / cacheReadTokens / cacheWriteTokens / outputTokens`，与界面底部状态栏的 `358M tok` 同一份数据 |
+| 上下文 | `contextPressure` 投影 | `projectedTokens / contextWindow`，下一轮请求的提示词规模占模型窗口的比例 |
+| 模型档位 | `modelSelection` 投影 | `next ?? lastUsed` 的 `model` 字段 |
+| 运行状态 | `uiSession.sessionStatus` | 生成中圆点变蓝、标题显示「生成中」 |
+| 余额 | `remote.account.getBalance` | Host 账号服务直连 DeepSeek 账号，浏览器不碰 key；返回 `{status:'ready', value:[{currency, balance}], bonusWallets:[…]}`，未登录为 `null`。60s 刷新一次 |
+| 金额 | 本地估算 | 见上 |
+
+## 余额：真余额，不是估的
+
+`余额` 一行来自 Host 的账号服务，跟 DeepSeek 网页上看到的那个数一致（含赠金时右侧标 `含赠金 ¥x`）：
+
+```js
+const account = ctx.remote.account                                   // 客户端注入 remote / remote.account
+const result = await account.getBalance({ version, locale, timezoneOffsetSeconds })
+// { ok: true, value: { status: 'ready', value: [{currency:'CNY', balance:'5.13'}], bonusWallets: [...] } }
+```
+
+要点：
+
+- **不发 HTTP、不存储或读取 API key**。宿主本来就持有登录凭据，客户端只是请它去问一次。
+- 60s 一次，展开/折叠都刷新；失败时保留上一次的数字，未登录或上游失败则置空（不显示假余额）。
+- 币种跟返回结果走（有 `CNY` 就用 `CNY`，否则 `USD`），不写死。
+
+## 「今日已用」落到磁盘
+
+`今日已用` 原来只存在 `localStorage`——换台机器、清了站点数据就归零。现在多了一条 Host 路由，把同一个数字写进 `~/.dsh/dsh-token-float/ledger.json`：
+
+```
+GET  /dsh-token-float-api/ledger                 → { ok, days: { "2026-11-03": 43.59, … } }
+POST /dsh-token-float-api/ledger { day, cost }   → { ok, days }
+```
+
+- 客户端启动时先 `GET` 回填，取「本地」和「磁盘」的较大值，所以一天的数字只会涨不会缩（`Math.max` 合并，重复刷新不会重复累加）。
+- 每次用量变化时 `POST` 当前总额，5s 节流，卸载时补一次。
+- 路由不存在（Host 没重启、或旧版本）→ 探测到 404 就退回纯 `localStorage`，功能照常，不会报错。
+- 这是**「按本机观测」的账**：只统计这台机器、这次安装看到的量，不是 DeepSeek 账单；和真余额对得上是因为价目表同样按官方峰谷价。
+
+## 安装位置
+
+插件本体在 profile 里（工作区的 `token-float/` 是指向它的目录联接，两边改的是同一份文件）。Linux 上是：
+
+```
+~/.dsh/profiles/web/plugins/dsh-token-float/
+├── package.json     # dsh.bundle（插件清单）+ dsh.client（platform=web，client 入口）
+├── cordis.patch.yml # 自带 patch：把 id=token-float 这一行插进插件树
+├── index.js         # Host 半侧：账本路由（/dsh-token-float-api/ledger）
+├── client.js        # 浏览器半侧：读数 + 明细面板 + 余额 + 账本同步 + 设置页
+└── README.md
+```
+
+Windows 上对应 `%USERPROFILE%\.dsh\profiles\desktop\plugins\dsh-token-float\`。
+
+`node_modules/dsh-token-float` 是指向它的目录联接，profile 的 `package.json` 里登记为 `"dsh-token-float": "link:./plugins/dsh-token-float"`，这样装别的插件时 `pnpm install` 不会把它当多余目录清掉。
+
+**它是一个「组合包」（bundle），所以出现在「设置 → 插件」列表里、能被开关和卸载**：
+
+```jsonc
+// package.json
+"dsh": {
+  "bundle": { "patch": "./cordis.patch.yml" },   // ← 有这句才算可管理的插件包
+  "client": { "platform": "web", "inject": [ … ] }
+}
+```
+
+```yaml
+# cordis.patch.yml（包自带）
+- insert:
+    - id: token-float
+      name: dsh-token-float
+```
+
+profile 的 `package.json` 里把它列进 `dsh.profile.bundles` 即可，**不用**再往 profile 的 `cordis.patch.yml` 里手写 `insert` 行（那是普通插件的装法；两者都写会插进两行）。关掉：在插件页把开关关掉，或从 `bundles` 里删掉这个名字。
+
+> 踩过的坑：只写 `insert` 不声明 `dsh.bundle` 时，插件照样能跑，但插件页会标 **Problem / "This package declares no bundle, so it cannot be managed as a plugin."**，而且没有开关。
+
+## 设置页：调价不用再展开面板
+
+「设置 → 插件 → dsh-token-float」有一页自己的配置，和侧边栏共用同一份设置（`localStorage` 的 `dsh.token-float.settings.v3`），**改完侧边栏立刻跟着变**，不用刷新：
+
+- **计价方式**：跟随内置价目表 / 手动单价（切到手动才出现下面几项）
+- **四项单价**（未命中 / 命中 / 缓存写 / 输出，单位：元每百万 token）与**币种** ¥ CNY / $ USD
+- **默认展开明细**：侧边栏那行进来就展开
+- **恢复默认**
+
+实现就是挂一个 keyed 槽位：
+
+```js
+ctx.slots.inject("plugins.bundle.config", () =>
+  ctx.slots.register({
+    name: "plugins.bundle.config",
+    key: "dsh-token-float",   // ← 必须是包名；keyed 槽位传 id 会让整个 web entry 起不来
+    locale: NS,
+    label: () => t_row("title")
+  }, PluginConfig))
+```
+
+组件收到 `props.view === "summary"`（摘要）或 `"page"`（完整设置区）。
+
+## 改代码之后怎么生效
+
+宿主按 Loader 说明符缓存已加载插件的包元数据，**保存 `client.js` 不会自动换上新 bundle**。可靠做法是刷新页面（`Ctrl+R`）；只改 `cordis.patch.yml` 会重排插件树，但 bundle 内容仍可能沿用缓存，同样以刷新页面为准。
+
+两侧不一样：
+
+| 改了 | 生效方式 |
+|---|---|
+| `client.js`（界面、读数、计价、余额、账本同步、设置页） | 刷新页面即可，不用重启 |
+| `package.json`（`dsh.bundle` / `dsh.client.inject`） | 宿主在启动时读包元数据；改完刷新页面，若不生效就重启 DSH |
+| `cordis.patch.yml`（包自带的清单） | 同上 |
+| `index.js`（账本路由） | 要重启 DSH 宿主；没重启时客户端探测到 404 会自动退回 `localStorage`，不会报错 |
+
+> 从「profile 手写 insert」迁到「bundle 自带 patch」之后，插件页里那一行要等宿主**重启一次**才变成 **Running**：新增的 loader 行在启动时才真正启用。重建后实测重启即恢复（`Components: 1 total · 1 running`），同时侧边栏读数、余额、账本路由三项一起生效。
+
+## 实现要点
+
+- 挂在 `sidebar.footer.action` 槽位：该槽位就是侧边栏 `footArea` 里、`settingsArea`（头像那一行）上方的容器，所以读数是「固定」在那里、不随对话滚动。
+- **文案跟随应用语言**：读 `ctx.locale.getLocale().active` 并订阅 `locale/change`，切换界面语言时这行会跟着变。**不要**用 `document.documentElement.lang` 或 `navigator.language` 做判断——语言包初始化前它们是 `en`，会把人骗成英文（这是个坑）；`<html lang>` 只作为兜底。
+- 侧边栏收成 56px 窄条时（槽位传入 `wide === false`），只显示金额。
+- 颜色用 DSH 自己的设计令牌（`--dsw-alias-label-primary/secondary`、`--dsw-alias-state-business-primary`、`--dsw-alias-border-l3`），跟随主题。
+- 没有新增任何模型可见内容（工具、提示词、上下文）——插件对模型完全不存在。
+- 只新增了一条 Host 路由 `/dsh-token-float-api/ledger`，走 `webServer.register` + `connection.requestRejection` 校验，与 DSH 自己的接口同一道身份边界；写盘目标是 `~/.dsh/dsh-token-float/ledger.json`，原子写（临时文件 + rename）。

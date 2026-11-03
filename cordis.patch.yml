@@ -1,0 +1,5 @@
+# dsh-token-float — the sidebar foot readout (token / cost / balance).
+# Bundled patch: installing this package as a plugin inserts exactly this one row.
+- insert:
+    - id: token-float
+      name: dsh-token-float
