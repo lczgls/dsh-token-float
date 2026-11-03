@@ -1,6 +1,6 @@
 # dsh-token-float · 侧边栏实时 token / 金额读数
 
-> **English** — a local-only [DeepSeek Harness](https://github.com/deepseek-ai) client plugin that pins a live
+> **English** — a local-only DeepSeek Harness client plugin that pins a live
 > token / cost readout above the account row in the sidebar. It prices usage with DeepSeek's official
 > peak / off-peak table (per model), shows the **real account balance** through the host account service
 > (no API key in the browser), keeps a durable daily ledger on disk, marks each turn as burning / local-only /
