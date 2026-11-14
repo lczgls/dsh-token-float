@@ -1,6 +1,6 @@
 {
   "name": "dsh-token-float",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Pinned token + cost readout in the DSH sidebar foot (above the account row): peak/off-peak pricing, real account balance, durable daily ledger, and its own settings page",
   "type": "module",

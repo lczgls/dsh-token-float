@@ -329,6 +329,12 @@ window.__ModuleLoader__.load({
 				turnMark: 0,
 				lastTurn: null,
 				wasRunning: false,
+				/** Host-attributed bookkeeping (see accountHost). */
+				hostSeen: false,
+				hostSessionId: void 0,
+				hostPrev: 0,
+				hostMark: 0,
+				hostWasRunning: false,
 				lastPressure: void 0,
 				lastActivityAt: 0,
 				/** Real account balance from the Host, or null when unavailable. */
@@ -395,6 +401,61 @@ window.__ModuleLoader__.load({
 			const costOf = (usage, price) =>
 				(usage.miss * price.miss + usage.write * price.write + usage.hit * price.hit + usage.out * price.out) / 1e6;
 
+			/**
+			 * dsh-context's attribution, read from the `contextTimeline` projection.
+			 *
+			 * The Host folds the session log and publishes
+			 * `cost: { [provider]: { [model]: { peak?, off? } } }`, each bucket holding
+			 * `{ uncached, cacheRead, cacheWrite, output }` priced into the tier the
+			 * request was actually billed in. That split is the one thing this side
+			 * cannot reconstruct: running totals only say "these tokens exist", so the
+			 * browser has to price each increment at whatever tier is current — which
+			 * mis-prices every session that crosses 12:00, 14:00 or 18:00, and every
+			 * session that switches model mid-way.
+			 *
+			 * Only the token attribution is taken from the Host. The money is still
+			 * computed here with our own CNY table (the Host prices in USD).
+			 */
+			const hostCostOf = (costMap) => {
+				if (!costMap || typeof costMap !== "object") return null;
+				const usage = { miss: 0, hit: 0, write: 0, out: 0 };
+				const models = [];
+				let cost = 0;
+				let any = false;
+				for (const provider of Object.keys(costMap)) {
+					const entries = costMap[provider];
+					if (!entries || typeof entries !== "object") continue;
+					for (const modelId of Object.keys(entries)) {
+						const buckets = entries[modelId];
+						if (!buckets || typeof buckets !== "object") continue;
+						const kind = modelKind(modelId);
+						let tokens = 0;
+						for (const tierKey of ["peak", "off"]) {
+							const bucket = buckets[tierKey];
+							if (!bucket || typeof bucket !== "object") continue;
+							const part = {
+								miss: Number(bucket.uncached) || 0,
+								hit: Number(bucket.cacheRead) || 0,
+								write: Number(bucket.cacheWrite) || 0,
+								out: Number(bucket.output) || 0
+							};
+							const sum = part.miss + part.hit + part.write + part.out;
+							if (sum <= 0) continue;
+							tokens += sum;
+							cost += costOf(part, priceAt(tierKey === "peak", kind));
+							usage.miss += part.miss;
+							usage.hit += part.hit;
+							usage.write += part.write;
+							usage.out += part.out;
+							any = true;
+						}
+						if (tokens > 0) models.push({ id: modelId, kind, tokens });
+					}
+				}
+				if (!any) return null;
+				return { usage, cost, models };
+			};
+
 			const account = (raw, kind) => {
 				const now = Date.now();
 				const tier = tierInfo(now);
@@ -454,6 +515,77 @@ window.__ModuleLoader__.load({
 				if (!raw.running && state.wasRunning) state.lastTurn = Math.max(0, state.increment - state.turnMark);
 				state.wasRunning = raw.running;
 			};
+			/**
+			 * Host-attributed accounting, used while `contextTimeline.cost` covers the
+			 * session. The day ledger is fed the *change* in the Host's figure, so the
+			 * "today" number inherits the correct peak/off attribution too, without ever
+			 * booking the same tokens twice.
+			 */
+			const accountHost = (sessionId, costNow, running) => {
+				const now = Date.now();
+				if (sessionId !== state.hostSessionId) {
+					state.hostSessionId = sessionId;
+					state.hostPrev = costNow;
+					state.hostMark = costNow;
+					state.hostWasRunning = running;
+					state.lastActivityAt = running ? now : 0;
+
+					// Book this session into "today" once, then keep the booked figure in step
+					// with the Host. Taking over from the token path reconciles the difference,
+					// so the day total neither reads below the session figure nor books the
+					// same tokens twice after a reload.
+					const key = todayKey(now);
+					if (day.date !== key) day = { date: key, cost: 0, seeded: {} };
+					if (!day.seeded) day.seeded = {};
+					if (sessionId) {
+						const booked = (day.seeded[sessionId] ?? 0) + state.increment;
+						const adjust = costNow - booked;
+						if (day.seeded[sessionId] === void 0 || adjust !== 0) {
+							day.seeded[sessionId] = costNow;
+							day.cost = Math.max(0, day.cost + adjust);
+							writeJSON(DAY_KEY, day);
+							ledgerPush();
+						}
+					}
+					state.increment = 0;
+					return;
+				}
+
+				const delta = Math.max(0, costNow - state.hostPrev);
+				state.hostPrev = costNow;
+				if (delta > 0) {
+					state.lastActivityAt = now;
+					const key = todayKey(now);
+					if (day.date !== key) day = { date: key, cost: 0, seeded: {} };
+					day.cost += delta;
+					// Keep the booked figure current so a reload reconciles to a zero delta.
+					if (sessionId && day.seeded) day.seeded[sessionId] = costNow;
+					writeJSON(DAY_KEY, day);
+				}
+
+				if (running && !state.hostWasRunning) {
+					state.hostMark = costNow;
+					state.lastActivityAt = now;
+				}
+				if (!running && state.hostWasRunning) state.lastTurn = Math.max(0, costNow - state.hostMark);
+				state.hostWasRunning = running;
+			};
+
+			/**
+			 * Re-anchor the token-increment ledger after a Host-attributed stretch: the
+			 * totals become the new baseline so the same tokens are never booked twice.
+			 * Costs re-price like a fresh page load, which is the same trade-off the
+			 * plugin already makes when it mounts mid-session.
+			 */
+			const reanchor = (usage) => {
+				state.prev = { ...usage };
+				state.baselineUsage = { ...usage };
+				state.baselinePeak = tierInfo(Date.now()).peak;
+				state.increment = 0;
+				state.turnMark = 0;
+				state.hostSessionId = void 0;
+				state.hostWasRunning = false;
+			};
 
 			const build = () => {
 				const now = Date.now();
@@ -468,16 +600,40 @@ window.__ModuleLoader__.load({
 				const readable = typeof projection === "function";
 				const rawUsage = readable ? faceSnapshot(projection("tokenUsage")) : void 0;
 				const pressure = readable ? faceSnapshot(projection("contextPressure")) : void 0;
-				const model = modelOf(projection);
+				const timeline = readable ? faceSnapshot(projection("contextTimeline")) : void 0;
 
-				const usage = {
+				const tokenUsage = {
 					miss: rawUsage?.uncachedInputTokens ?? 0,
 					out: rawUsage?.outputTokens ?? 0,
 					hit: rawUsage?.cacheReadTokens ?? 0,
 					write: rawUsage?.cacheWriteTokens ?? 0
 				};
+				const tokenTotal = tokenUsage.miss + tokenUsage.out + tokenUsage.hit + tokenUsage.write;
+
+				// Prefer the Host's tier attribution whenever it covers the whole session. A
+				// fold that lags behind the live totals is ignored, otherwise the readout would
+				// freeze while a long turn streams.
+				const hostSplit = hostCostOf(timeline && timeline.cost);
+				const hostTotal = hostSplit
+					? hostSplit.usage.miss + hostSplit.usage.hit + hostSplit.usage.write + hostSplit.usage.out
+					: 0;
+				const useHost = Boolean(hostSplit) && hostTotal >= tokenTotal;
+
+				const usage = useHost ? hostSplit.usage : tokenUsage;
 				const total = usage.miss + usage.out + usage.hit + usage.write;
 				const running = statusOf(sessionId)?.running === true;
+
+				let model = modelOf(projection);
+				if (useHost && hostSplit.models.length > 0) {
+					// The Host knows which models actually billed; `modelSelection` only knows
+					// what is selected now, which is wrong as soon as a session switches.
+					const ranked = hostSplit.models.slice().sort((left, right) => right.tokens - left.tokens);
+					model = {
+						id: ranked[0].id,
+						kind: ranked[0].kind,
+						name: PRICING[ranked[0].kind].name + (ranked.length > 1 ? " +" + (ranked.length - 1) : "")
+					};
+				}
 
 				const resolved = {
 					active: Boolean(sessionId),
@@ -487,14 +643,24 @@ window.__ModuleLoader__.load({
 					total,
 					model
 				};
-				account({ ...resolved, usage }, model.kind);
+
+				if (useHost) {
+					state.hostSeen = true;
+					accountHost(sessionId, hostSplit.cost, running);
+				} else {
+					if (state.hostSeen) {
+						state.hostSeen = false;
+						reanchor(tokenUsage);
+					}
+					account({ ...resolved, usage: tokenUsage }, model.kind);
+				}
 
 				const tier = tierInfo(now);
 				// History before this page mounted is priced at the tier it was first seen in;
 				// every later increment was priced when it arrived.
 				const baseline = state.baselineUsage ?? usage;
 				const baselineCost = costOf(baseline, priceAt(state.baselinePeak, model.kind));
-				const cost = baselineCost + state.increment;
+				const cost = useHost ? hostSplit.cost : baselineCost + state.increment;
 
 				const used = pressure?.projectedTokens ?? pressure?.pressureTokens;
 				const contextWindow = pressure?.contextWindow;
@@ -577,7 +743,7 @@ window.__ModuleLoader__.load({
 				const binding = bindingOf();
 				const projection = binding && binding.keyedHooks ? binding.keyedHooks.projection : void 0;
 				if (typeof projection !== "function") return;
-				for (const key of ["tokenUsage", "contextPressure", "modelSelection"]) {
+				for (const key of ["tokenUsage", "contextPressure", "modelSelection", "contextTimeline"]) {
 					try {
 						const face = projection(key);
 						if (face && typeof face.subscribe === "function") subscriptions.push(face.subscribe(publish));
@@ -590,9 +756,6 @@ window.__ModuleLoader__.load({
 				publish();
 			});
 			const offStatus = uiSession.sessionStatus.subscribe(publish);
-
-			resubscribe();
-			publish();
 
 			// Nothing may arrive for minutes while a local tool runs, so re-evaluate the
 			// burn window on a slow beat instead of waiting for the next projection frame.
@@ -710,6 +873,11 @@ window.__ModuleLoader__.load({
 			const ledgerTimer = setInterval(() => {
 				if (ledgerPushPending) ledgerPush(true);
 			}, LEDGER_PUSH_GAP_MS);
+
+			// The first build can seed the day figure and push it to the Host, so it runs
+			// only once everything it calls is initialised.
+			resubscribe();
+			publish();
 
 			return {
 				getSnapshot: () => value,

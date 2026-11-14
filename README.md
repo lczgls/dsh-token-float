@@ -56,9 +56,10 @@
 
 几处实现上的取舍：
 
-- **按增量计价，而不是按当前时刻重算历史。** 每次投影推来新用量，就把这一段增量按「此刻所处时段」的价格记进去；页面打开前已有的历史按打开时的时段一次性定价。所以一个跨越 18:00 的长会话，18:00 之前的部分仍按高峰价、之后按谷价。
-- **模型档位**取自会话的 `modelSelection` 投影（`deepseek-flash` / `deepseek-v4-pro`），面板右下角会显示识别到的模型名。
-- **「今日已用」是本机观测值**：按本页看到的增量累计，另外每个会话首次出现时会一次性并入它已有的金额（同一天同一会话只补一次，刷新页面不会重复记）。换机器、换浏览器、或页面没打开时的消耗都不在内——它跟账单口径不一样。
+- **峰谷拆分优先问宿主，拿不到才退回增量估算。** 装了 `dsh-context` 时，它发布的 `contextTimeline.cost` 已经把 token 按「这次请求实际发生在哪个时段」分进 `peak` / `off` 两个桶，这里直接按桶乘对应时段单价——跨越 12:00 / 14:00 / 18:00 的会话不会再被整段算成同一档。没有这个投影、或者它的折叠还落后于 `tokenUsage` 的实时汇总时，退回原来的增量计价：每次投影推来新用量就按「此刻所处时段」记一笔，页面打开前已有的历史按打开时的时段一次性定价。
+- **单价始终是本地的 `PRICING` 表（CNY）**，宿主那份美元报价不参与计算，所以金额口径和以前一样，只是峰谷归属更准。
+- **模型档位**优先看宿主实际计费了哪些模型（`peak/off` 桶按 model 分组）；一个会话里换过模型时显示占比最大的那个，后面标 `+1`。宿主没有这份数据时退回 `modelSelection` 投影（`deepseek-flash` / `deepseek-v4-pro`）。
+- **「今日已用」是本机观测值**：按本页看到的增量累计，另外每个会话首次出现时会一次性并入它已有的金额（同一天同一会话只补一次，刷新页面不会重复记）。走宿主归因时入账的是宿主金额的增量，和上面那行「合计」同口径。换机器、换浏览器、或页面没打开时的消耗都不在内——它跟账单口径不一样。
 - **「上一轮」**：会话从「生成中」转为空闲时，结算这一轮新增的金额。
 - 需要别的价（第三方中转、自定义模型）可在「价目表 → 改手动」里填单价并选 CNY/USD；默认「跟随内置」。
 
@@ -68,10 +69,11 @@
 |---|---|---|
 | token 明细 | `tokenUsage` 会话投影 | Host 侧 `@deepseek-ai/dsh-token-meter` 折叠整份会话日志得到的 `uncachedInputTokens / cacheReadTokens / cacheWriteTokens / outputTokens`，与界面底部状态栏的 `358M tok` 同一份数据 |
 | 上下文 | `contextPressure` 投影 | `projectedTokens / contextWindow`，下一轮请求的提示词规模占模型窗口的比例 |
-| 模型档位 | `modelSelection` 投影 | `next ?? lastUsed` 的 `model` 字段 |
+| 峰谷拆分 | `contextTimeline.cost` 投影（`dsh-context`） | `{ [provider]: { [model]: { peak?, off? } } }`，每个桶是 `{ uncached, cacheRead, cacheWrite, output }`，由 Host 折叠会话日志时按请求实际时段分桶。只有桶内总量不小于 `tokenUsage` 汇总时才采用，避免长回合里折叠落后把读数冻住 |
+| 模型档位 | `modelSelection` 投影 | `next ?? lastUsed` 的 `model` 字段；有峰谷拆分时改由桶的 model 键决定 |
 | 运行状态 | `uiSession.sessionStatus` | 生成中圆点变蓝、标题显示「生成中」 |
 | 余额 | `remote.account.getBalance` | Host 账号服务直连 DeepSeek 账号，浏览器不碰 key；返回 `{status:'ready', value:[{currency, balance}], bonusWallets:[…]}`，未登录为 `null`。60s 刷新一次 |
-| 金额 | 本地估算 | 见上 |
+| 金额 | 本地 `PRICING` 表 | 峰谷归属取自宿主（有就用），单价永远是本地 CNY 表；见上 |
 
 ## 余额：真余额，不是估的
 
