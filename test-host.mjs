@@ -35,6 +35,11 @@ function makeWorld(sharedStore, opts = {}) {
   if (!opts.migrate && !ls.getItem("dsh.token-float.migrated.v3")) {
     ls.setItem("dsh.token-float.migrated.v3", JSON.stringify({ at: 0 }));
   }
+  // Unless a case asks otherwise, pretend this page already observed the chat, so
+  // the first real frame is growth rather than unexplained history.
+  if (opts.seen !== false && !ls.getItem("dsh.token-float.seen.v1")) {
+    ls.setItem("dsh.token-float.seen.v1", JSON.stringify({ s1: { observed: true, at: NOW, tok: { miss: 0, hit: 0, write: 0, out: 0 }, host: 0 } }));
+  }
   const windowStub = { __ModuleLoader__: { load: (m) => { mod = m; } }, localStorage: ls };
   new Function("window", "document", "fetch", "require", SRC)(windowStub, documentStub, fetchStub, (id) => ReactStub);
   if (!mod || mod.id !== "dsh-token-float") throw new Error("module not loaded");
@@ -166,6 +171,32 @@ let worldB;
   results.H_next_day_growth = brief(snap(w2));
   w2.disposers.forEach((d) => d());
 }
+
+// L: a chat this page has never observed contributes nothing on first sight
+{
+  NOW = PEAK;
+  const w = makeWorld(new Map(), { seen: false });
+  w.tokenUsage = { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  results.L_empty_frame = brief(snap(w));
+  w.tokenUsage = { uncachedInputTokens: 5e6, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  results.L_unseen_history = brief(snap(w));
+  w.tokenUsage = { uncachedInputTokens: 6e6, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  results.L_unseen_growth = brief(snap(w));
+  w.disposers.forEach((d) => d());
+}
+
+// M: a legacy all-zero record in storage must not resurrect a chat's whole history
+{
+  NOW = PEAK;
+  const store = new Map();
+  store.set("dsh.token-float.migrated.v3", JSON.stringify({ at: NOW }));
+  store.set("dsh.token-float.seen.v1", JSON.stringify({ s1: { at: NOW, tok: { miss: 0, hit: 0, write: 0, out: 0 }, host: 0 } }));
+  const w = makeWorld(store, { seen: false });
+  w.tokenUsage = { uncachedInputTokens: 5e6, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  results.M_dirty_seen = brief(snap(w));
+  w.disposers.forEach((d) => d());
+}
+
 
 // I: same rule on the Host path
 {

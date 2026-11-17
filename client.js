@@ -288,6 +288,12 @@ window.__ModuleLoader__.load({
 			for (const [id, record] of Object.entries(stored)) {
 				if (!record || typeof record !== "object") continue;
 				if (Number.isFinite(record.at) && now - record.at > SEEN_TTL_MS) continue;
+				// Older builds wrote an all-zero frame as "observed"; that shell carries no
+				// information and would make the next real frame look like fresh spending.
+				const zeroTok =
+					record.tok && !record.tok.miss && !record.tok.hit && !record.tok.write && !record.tok.out;
+				const zeroHost = !Number.isFinite(record.host) || record.host === 0;
+				if (!record.observed && zeroTok && zeroHost) continue;
 				seen[id] = record;
 			}
 			return seen;
@@ -373,8 +379,12 @@ window.__ModuleLoader__.load({
 			const markSeen = (sessionId, patch) => {
 				if (!sessionId) return;
 				const previous = seen[sessionId] || {};
-				const next = { ...previous, at: Date.now() };
+				const next = { ...previous, at: Date.now(), observed: true };
 				if (patch.tok) {
+					const t = patch.tok;
+					// An all-zero frame is an unpopulated projection, not an observation;
+					// storing it as the frontier would make the next real frame look like growth.
+					if (!previous.tok && !t.miss && !t.hit && !t.write && !t.out) return;
 					const old = previous.tok;
 					next.tok = old
 						? {
@@ -386,6 +396,7 @@ window.__ModuleLoader__.load({
 						: { ...patch.tok };
 				}
 				if (Number.isFinite(patch.host)) {
+					if (!Number.isFinite(previous.host) && patch.host === 0) return;
 					next.host = Number.isFinite(previous.host) ? Math.max(previous.host, patch.host) : patch.host;
 				}
 				seen[sessionId] = next;
@@ -552,6 +563,16 @@ window.__ModuleLoader__.load({
 					state.wasRunning = raw.running;
 					state.lastPressure = void 0;
 					state.lastActivityAt = raw.running ? now : 0;
+					// An unpopulated frame is not an observation of zero tokens: leaving the
+					// session unanchored keeps the next real frame a *first* sighting, so its
+					// history is not billed as if it had just been spent.
+					if (raw.usage.miss + raw.usage.hit + raw.usage.write + raw.usage.out === 0) {
+						const knownFirst = raw.sessionId ? seen[raw.sessionId] : void 0;
+						if (!knownFirst || !knownFirst.tok) {
+							state.sessionId = null;
+							return;
+						}
+					}
 
 					// Only the growth since this Session was last seen is today's money. Its
 					// cumulative total covers its whole life; booking that wholesale is what
@@ -569,15 +590,16 @@ window.__ModuleLoader__.load({
 						state.baselineUsage = { ...priorTok };
 						return;
 					}
-					if (raw.sessionId && !pageBooked.has(raw.sessionId)) {
-						const frontier = known && known.tok
-							? {
-								miss: Math.max(0, raw.usage.miss - known.tok.miss),
-								hit: Math.max(0, raw.usage.hit - known.tok.hit),
-								write: Math.max(0, raw.usage.write - known.tok.write),
-								out: Math.max(0, raw.usage.out - known.tok.out)
-							}
-							: { ...raw.usage };
+					// No stored frontier means this page has never seen the chat, so its whole
+					// life predates us: adopt the current totals as the baseline and book
+					// nothing. Later frames book only real growth.
+					if (raw.sessionId && !pageBooked.has(raw.sessionId) && known && known.tok) {
+						const frontier = {
+							miss: Math.max(0, raw.usage.miss - known.tok.miss),
+							hit: Math.max(0, raw.usage.hit - known.tok.hit),
+							write: Math.max(0, raw.usage.write - known.tok.write),
+							out: Math.max(0, raw.usage.out - known.tok.out)
+						};
 						book(raw.sessionId, costOf(frontier, price));
 					}
 					if (raw.sessionId) markSeen(raw.sessionId, { tok: { ...raw.usage } });
@@ -633,11 +655,17 @@ window.__ModuleLoader__.load({
 					if (sessionId && !pageBooked.has(sessionId)) {
 						const known = seen[sessionId];
 						const frontier = known && Number.isFinite(known.host) ? known.host : void 0;
-						if (frontier !== void 0 && costNow === 0) {
-							state.hostPrev = frontier;
+						if (frontier !== void 0) {
+							if (costNow === 0) {
+								state.hostPrev = frontier;
+								return;
+							}
+							book(sessionId, Math.max(0, costNow - frontier));
+						} else if (costNow === 0) {
+							state.hostSessionId = void 0;
+							state.hostPrev = 0;
 							return;
 						}
-						book(sessionId, frontier === void 0 ? costNow : Math.max(0, costNow - frontier));
 					}
 					if (sessionId) markSeen(sessionId, { host: costNow });
 					state.increment = 0;
@@ -955,9 +983,10 @@ window.__ModuleLoader__.load({
 					ledgerOff = false;
 					const payload = await response.json();
 					const remote = payload && payload.days ? Number(payload.days[day.date]) : NaN;
-					if (Number.isFinite(remote) && remote > day.cost) {
-						// The Host ledger is re-seeded from the session logs, so it knows the real
-						// figure for a day this browser has not booked in full.
+					if (Number.isFinite(remote) && Math.abs(remote - day.cost) > 1e-9) {
+						// The Host ledger is the durable record (it is re-seeded from the session
+						// logs), so it also wins when it is *lower*: that is how a page holding an
+						// inflated local figure gets repaired instead of pushing it back forever.
 						day.cost = remote;
 						writeJSON(DAY_KEY, day);
 						publish();
