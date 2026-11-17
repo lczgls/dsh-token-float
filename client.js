@@ -14,6 +14,18 @@ window.__ModuleLoader__.load({
 		const SETTINGS_KEY = "dsh.token-float.settings.v3";
 		/** Browser-local per-day spend key. */
 		const DAY_KEY = "dsh.token-float.day.v1";
+		/**
+		 * Per-session cost frontier. A session's cumulative figure says nothing about
+		 * which day the money was spent in, so the meter remembers the last value it
+		 * already booked and treats only the growth as new. This is the difference
+		 * between "today" and "this chat's entire history".
+		 */
+		const SEEN_KEY = "dsh.token-float.seen.v1";
+		/** Sessions older than this are forgotten; they would be re-seeded anyway. */
+		const SEEN_TTL_MS = 60 * 24 * 3600 * 1000;
+		const SEEN_MAX = 200;
+		/** One-shot marker: figures written before 1.3.0 booked session history as today. */
+		const MIGRATED_KEY = "dsh.token-float.migrated.v3";
 		/** Host route that keeps the same per-day figure on disk (404 on older Hosts). */
 		const LEDGER_ROUTE = "/dsh-token-float-api/ledger";
 		/** Silence after which a running turn is reported as local work, not model billing. */
@@ -269,6 +281,25 @@ window.__ModuleLoader__.load({
 			return { date: key, cost: 0, seeded: {} };
 		}
 
+		function loadSeen() {
+			const stored = readJSON(SEEN_KEY, {});
+			const now = Date.now();
+			const seen = {};
+			for (const [id, record] of Object.entries(stored)) {
+				if (!record || typeof record !== "object") continue;
+				if (Number.isFinite(record.at) && now - record.at > SEEN_TTL_MS) continue;
+				seen[id] = record;
+			}
+			return seen;
+		}
+
+		function saveSeen(seen) {
+			const entries = Object.entries(seen)
+				.sort((left, right) => (right[1].at || 0) - (left[1].at || 0))
+				.slice(0, SEEN_MAX);
+			writeJSON(SEEN_KEY, Object.fromEntries(entries));
+		}
+
 		function faceSnapshot(face) {
 			if (!face || typeof face.getSnapshot !== "function") return void 0;
 			try {
@@ -313,6 +344,53 @@ window.__ModuleLoader__.load({
 			let disposed = false;
 			let settings = readSettings();
 			let day = loadDay();
+			/** Booked frontier per Session, shared across page loads and days. */
+			const seen = loadSeen();
+			/** Sessions already booked in this page lifetime; switches must not re-book. */
+			const pageBooked = new Set();
+
+			/** Roll the day document over when the Beijing date changes. */
+			const rollDay = () => {
+				const key = todayKey(Date.now());
+				if (day.date !== key) {
+					day = { date: key, cost: 0 };
+					writeJSON(DAY_KEY, day);
+				}
+				return day;
+			};
+
+			/** Add freshly observed spend to today and mirror it to the Host. */
+			const book = (sessionId, amount) => {
+				if (!(amount > 0)) return;
+				rollDay();
+				day.cost += amount;
+				if (sessionId) pageBooked.add(sessionId);
+				writeJSON(DAY_KEY, day);
+				ledgerPush();
+			};
+
+			/** Remember how far this Session has already been booked. */
+			const markSeen = (sessionId, patch) => {
+				if (!sessionId) return;
+				const previous = seen[sessionId] || {};
+				const next = { ...previous, at: Date.now() };
+				if (patch.tok) {
+					const old = previous.tok;
+					next.tok = old
+						? {
+							miss: Math.max(old.miss || 0, patch.tok.miss || 0),
+							hit: Math.max(old.hit || 0, patch.tok.hit || 0),
+							write: Math.max(old.write || 0, patch.tok.write || 0),
+							out: Math.max(old.out || 0, patch.tok.out || 0)
+						}
+						: { ...patch.tok };
+				}
+				if (Number.isFinite(patch.host)) {
+					next.host = Number.isFinite(previous.host) ? Math.max(previous.host, patch.host) : patch.host;
+				}
+				seen[sessionId] = next;
+				saveSeen(seen);
+			};
 			// The config page can change prices while the row is mounted; mirror it live.
 			const offSettings = subscribeSettings(() => {
 				settings = readSettings();
@@ -329,6 +407,8 @@ window.__ModuleLoader__.load({
 				turnMark: 0,
 				lastTurn: null,
 				wasRunning: false,
+				/** Set once by the 1.3.0 migration: skip booking the first Session seen. */
+				fresh: false,
 				/** Host-attributed bookkeeping (see accountHost). */
 				hostSeen: false,
 				hostSessionId: void 0,
@@ -473,19 +553,34 @@ window.__ModuleLoader__.load({
 					state.lastPressure = void 0;
 					state.lastActivityAt = raw.running ? now : 0;
 
-					// Count the Session's existing total into "today" once per page-day, so the
-					// day figure never reads lower than the session figure and a reload does
-					// not book the same tokens twice.
-					const key = todayKey(now);
-					if (day.date !== key) day = { date: key, cost: 0, seeded: {} };
-					if (!day.seeded) day.seeded = {};
-					if (raw.sessionId && day.seeded[raw.sessionId] === void 0) {
-						const seed = costOf(raw.usage, price);
-						day.seeded[raw.sessionId] = seed;
-						day.cost += seed;
-						writeJSON(DAY_KEY, day);
-						ledgerPush();
+					// Only the growth since this Session was last seen is today's money. Its
+					// cumulative total covers its whole life; booking that wholesale is what
+					// used to inflate "today" by the history of every chat opened that day.
+					if (state.fresh && raw.sessionId) {
+						state.fresh = false;
+						pageBooked.add(raw.sessionId);
 					}
+					const known = raw.sessionId ? seen[raw.sessionId] : void 0;
+					// A first frame can arrive before the projection is populated; treating that
+					// empty reading as "seen 0 tokens" would rebook the whole session a frame later.
+					const priorTok = known && known.tok ? known.tok : null;
+					if (priorTok && raw.usage.miss + raw.usage.hit + raw.usage.write + raw.usage.out === 0) {
+						state.prev = { ...priorTok };
+						state.baselineUsage = { ...priorTok };
+						return;
+					}
+					if (raw.sessionId && !pageBooked.has(raw.sessionId)) {
+						const frontier = known && known.tok
+							? {
+								miss: Math.max(0, raw.usage.miss - known.tok.miss),
+								hit: Math.max(0, raw.usage.hit - known.tok.hit),
+								write: Math.max(0, raw.usage.write - known.tok.write),
+								out: Math.max(0, raw.usage.out - known.tok.out)
+							}
+							: { ...raw.usage };
+						book(raw.sessionId, costOf(frontier, price));
+					}
+					if (raw.sessionId) markSeen(raw.sessionId, { tok: { ...raw.usage } });
 					return;
 				}
 
@@ -502,11 +597,9 @@ window.__ModuleLoader__.load({
 				if (spent > 0) {
 					state.increment += spent;
 					state.lastActivityAt = now;
-					const key = todayKey(now);
-					if (day.date !== key) day = { date: key, cost: 0, seeded: {} };
-					day.cost += spent;
-					writeJSON(DAY_KEY, day);
+					book(raw.sessionId, spent);
 				}
+				if (raw.sessionId) markSeen(raw.sessionId, { tok: { ...raw.usage } });
 
 				if (raw.running && !state.wasRunning) {
 					state.turnMark = state.increment;
@@ -530,23 +623,23 @@ window.__ModuleLoader__.load({
 					state.hostWasRunning = running;
 					state.lastActivityAt = running ? now : 0;
 
-					// Book this session into "today" once, then keep the booked figure in step
-					// with the Host. Taking over from the token path reconciles the difference,
-					// so the day total neither reads below the session figure nor books the
-					// same tokens twice after a reload.
-					const key = todayKey(now);
-					if (day.date !== key) day = { date: key, cost: 0, seeded: {} };
-					if (!day.seeded) day.seeded = {};
-					if (sessionId) {
-						const booked = (day.seeded[sessionId] ?? 0) + state.increment;
-						const adjust = costNow - booked;
-						if (day.seeded[sessionId] === void 0 || adjust !== 0) {
-							day.seeded[sessionId] = costNow;
-							day.cost = Math.max(0, day.cost + adjust);
-							writeJSON(DAY_KEY, day);
-							ledgerPush();
-						}
+					// Same rule as the token path: only the growth since the last sighting
+					// is today's money. A chat that predates today contributes nothing until
+					// it actually spends again.
+					if (state.fresh && sessionId) {
+						state.fresh = false;
+						pageBooked.add(sessionId);
 					}
+					if (sessionId && !pageBooked.has(sessionId)) {
+						const known = seen[sessionId];
+						const frontier = known && Number.isFinite(known.host) ? known.host : void 0;
+						if (frontier !== void 0 && costNow === 0) {
+							state.hostPrev = frontier;
+							return;
+						}
+						book(sessionId, frontier === void 0 ? costNow : Math.max(0, costNow - frontier));
+					}
+					if (sessionId) markSeen(sessionId, { host: costNow });
 					state.increment = 0;
 					return;
 				}
@@ -555,13 +648,10 @@ window.__ModuleLoader__.load({
 				state.hostPrev = costNow;
 				if (delta > 0) {
 					state.lastActivityAt = now;
-					const key = todayKey(now);
-					if (day.date !== key) day = { date: key, cost: 0, seeded: {} };
-					day.cost += delta;
-					// Keep the booked figure current so a reload reconciles to a zero delta.
-					if (sessionId && day.seeded) day.seeded[sessionId] = costNow;
-					writeJSON(DAY_KEY, day);
+					book(sessionId, delta);
 				}
+				// Keep the frontier current so a reload only books the growth.
+				if (sessionId) markSeen(sessionId, { host: costNow });
 
 				if (running && !state.hostWasRunning) {
 					state.hostMark = costNow;
@@ -669,8 +759,7 @@ window.__ModuleLoader__.load({
 						? { used, window: contextWindow }
 						: null;
 
-				const key = todayKey(now);
-				if (day.date !== key) day = { date: key, cost: 0, seeded: {} };
+				rollDay();
 
 				// A model request bumps `contextPressure`; a completed answer bumps the usage
 				// totals. Either is evidence the turn is really talking to the model, as opposed
@@ -833,7 +922,7 @@ window.__ModuleLoader__.load({
 			/** Set once the probe proves there is no Host route, so we stop posting 404s. */
 			let ledgerOff = false;
 
-			const ledgerPush = (force) => {
+			const ledgerPush = (force, reset) => {
 				if (disposed || ledgerOff) return;
 				const now = Date.now();
 				if (!force && now - ledgerAt < LEDGER_PUSH_GAP_MS) {
@@ -846,7 +935,11 @@ window.__ModuleLoader__.load({
 					fetch(LEDGER_ROUTE, {
 						method: "POST",
 						headers: { "content-type": "application/json" },
-						body: JSON.stringify({ day: day.date, cost: Math.round(day.cost * 1e6) / 1e6 }),
+						body: JSON.stringify({
+							day: day.date,
+							cost: Math.round(day.cost * 1e6) / 1e6,
+							...(reset ? { reset: true } : {})
+						}),
 						keepalive: true
 					}).catch(() => {});
 				} catch {}
@@ -863,6 +956,8 @@ window.__ModuleLoader__.load({
 					const payload = await response.json();
 					const remote = payload && payload.days ? Number(payload.days[day.date]) : NaN;
 					if (Number.isFinite(remote) && remote > day.cost) {
+						// The Host ledger is re-seeded from the session logs, so it knows the real
+						// figure for a day this browser has not booked in full.
 						day.cost = remote;
 						writeJSON(DAY_KEY, day);
 						publish();
@@ -870,6 +965,20 @@ window.__ModuleLoader__.load({
 				} catch {}
 			};
 			ledgerPull();
+
+			// One-off repair: up to 1.2.x the day figure booked each Session's entire
+			// history the first time it was opened, so today's number can sit far above
+			// what was spent. Drop it, and mark the first Session seen as already booked
+			// so the next build cannot re-add the history.
+			if (!readJSON(MIGRATED_KEY, null)) {
+				writeJSON(MIGRATED_KEY, { at: Date.now() });
+				day = { date: todayKey(Date.now()), cost: 0 };
+				writeJSON(DAY_KEY, day);
+				state.fresh = true;
+				// The Host ledger is re-seeded from the session logs, so adopt its figure for
+				// today instead of pushing our zero over it.
+				ledgerPull();
+			}
 			const ledgerTimer = setInterval(() => {
 				if (ledgerPushPending) ledgerPush(true);
 			}, LEDGER_PUSH_GAP_MS);

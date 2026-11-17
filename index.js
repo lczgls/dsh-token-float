@@ -140,9 +140,17 @@ export function apply(ctx) {
               respond(res, 400, { error: 'expected { day: "YYYY-MM-DD", cost: number >= 0 }' })
               return
             }
+            // 'reset' is the migration escape hatch: the client is the only
+            // writer, and it needs one way to lower a figure an older version
+            // inflated. Normal flushes keep the max so a stale push cannot
+            // shrink the day.
+            const reset = args.reset === true
             let days = null
             writeChain = writeChain.then(async () => {
-              const ledger = mergeDay(await readLedger(), day, cost)
+              const current = await readLedger()
+              const ledger = reset
+                ? { version: 1, days: { ...current.days, [day]: Math.round(cost * 1e6) / 1e6 } }
+                : mergeDay(current, day, cost)
               await writeLedger(ledger)
               days = ledger.days
             })
