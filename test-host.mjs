@@ -38,7 +38,7 @@ function makeWorld(sharedStore, opts = {}) {
   // Unless a case asks otherwise, pretend this page already observed the chat, so
   // the first real frame is growth rather than unexplained history.
   if (opts.seen !== false && !ls.getItem("dsh.token-float.seen.v1")) {
-    ls.setItem("dsh.token-float.seen.v1", JSON.stringify({ s1: { observed: true, at: NOW, tok: { miss: 0, hit: 0, write: 0, out: 0 }, host: 0 } }));
+    ls.setItem("dsh.token-float.seen.v1", JSON.stringify({ s1: { observed: true, at: NOW, tok: { miss: 0, hit: 0, write: 0, out: 0 }, host: 0, day: "2026-11-10" } }));
   }
   const windowStub = { __ModuleLoader__: { load: (m) => { mod = m; } }, localStorage: ls };
   new Function("window", "document", "fetch", "require", SRC)(windowStub, documentStub, fetchStub, (id) => ReactStub);
@@ -190,7 +190,7 @@ let worldB;
   NOW = PEAK;
   const store = new Map();
   store.set("dsh.token-float.migrated.v3", JSON.stringify({ at: NOW }));
-  store.set("dsh.token-float.seen.v1", JSON.stringify({ s1: { at: NOW, tok: { miss: 0, hit: 0, write: 0, out: 0 }, host: 0 } }));
+  store.set("dsh.token-float.seen.v1", JSON.stringify({ s1: { at: NOW, tok: { miss: 0, hit: 0, write: 0, out: 0 }, host: 0, day: "2026-11-10" } }));
   const w = makeWorld(store, { seen: false });
   w.tokenUsage = { uncachedInputTokens: 5e6, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   results.M_dirty_seen = brief(snap(w));

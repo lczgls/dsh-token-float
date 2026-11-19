@@ -379,7 +379,7 @@ window.__ModuleLoader__.load({
 			const markSeen = (sessionId, patch) => {
 				if (!sessionId) return;
 				const previous = seen[sessionId] || {};
-				const next = { ...previous, at: Date.now(), observed: true };
+				const next = { ...previous, at: Date.now(), observed: true, day: todayKey(Date.now()) };
 				if (patch.tok) {
 					const t = patch.tok;
 					// An all-zero frame is an unpopulated projection, not an observation;
@@ -593,7 +593,7 @@ window.__ModuleLoader__.load({
 					// No stored frontier means this page has never seen the chat, so its whole
 					// life predates us: adopt the current totals as the baseline and book
 					// nothing. Later frames book only real growth.
-					if (raw.sessionId && !pageBooked.has(raw.sessionId) && known && known.tok) {
+					if (raw.sessionId && !pageBooked.has(raw.sessionId) && known && known.tok && known.day === todayKey(Date.now())) {
 						const frontier = {
 							miss: Math.max(0, raw.usage.miss - known.tok.miss),
 							hit: Math.max(0, raw.usage.hit - known.tok.hit),
@@ -660,7 +660,7 @@ window.__ModuleLoader__.load({
 								state.hostPrev = frontier;
 								return;
 							}
-							book(sessionId, Math.max(0, costNow - frontier));
+							if (known && known.day === todayKey(Date.now())) book(sessionId, Math.max(0, costNow - frontier));
 						} else if (costNow === 0) {
 							state.hostSessionId = void 0;
 							state.hostPrev = 0;
@@ -765,6 +765,16 @@ window.__ModuleLoader__.load({
 				if (useHost) {
 					state.hostSeen = true;
 					accountHost(sessionId, hostSplit.cost, running);
+				} else if (hostSplit) {
+					// The Host covers this Session but its fold is behind the live totals.
+					// Booking the token delta at local prices now, then the Host delta when the
+					// fold catches up, would charge the same work twice: wait for the Host and
+					// keep the ledger honest. The readout still uses the live token counts.
+					state.hostSeen = true;
+					state.prev = { ...tokenUsage };
+					state.baselineUsage = { ...tokenUsage };
+					state.baselinePeak = tierInfo(Date.now()).peak;
+					if (sessionId) markSeen(sessionId, { tok: { ...tokenUsage } });
 				} else {
 					if (state.hostSeen) {
 						state.hostSeen = false;
